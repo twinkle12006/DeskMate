@@ -1,15 +1,43 @@
 // src/hooks/useWebRTC.js
 import { useEffect, useRef, useCallback, useState } from "react";
 import socket from "../utils/socket";
+const TURN_HOST = "deskmate";
+const TURN_USER = "744bfc4fa8089e5e22b93c9c";
+const TURN_PASS = "	CReueu7JXgSgW5QL";
 
 const ICE_SERVERS = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
+    {
+      urls: `turn:${TURN_HOST}:80`,
+      username: TURN_USER,
+      credential: TURN_PASS,
+    },
+    {
+      urls: `turn:${TURN_HOST}:443`,
+      username: TURN_USER,
+      credential: TURN_PASS,
+    },
+    {
+      urls: `turns:${TURN_HOST}:443`,
+      username: TURN_USER,
+      credential: TURN_PASS,
+    },
   ],
+  iceCandidatePoolSize: 10,
 };
 
-export const useWebRTC = (role, code, onSessionEnded) => {
+const canScreenShare = () =>
+  typeof navigator !== "undefined" &&
+  typeof navigator.mediaDevices?.getDisplayMedia === "function";
+
+export const useWebRTC = (
+  role,
+  code,
+  onSessionEnded,
+  initialGuestReady = false,
+) => {
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
   const localVideoRef = useRef(null);
@@ -22,8 +50,9 @@ export const useWebRTC = (role, code, onSessionEnded) => {
 
   const [isCapturing, setIsCapturing] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
-  const [guestReady, setGuestReady] = useState(false);
+  const [guestReady, setGuestReady] = useState(initialGuestReady);
   const [error, setError] = useState(null);
+  const [isMobileHost] = useState(role === "host" && !canScreenShare());
 
   const stopSharing = useCallback(() => {
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -41,51 +70,87 @@ export const useWebRTC = (role, code, onSessionEnded) => {
     if (pcRef.current) pcRef.current.close();
     const pc = new RTCPeerConnection(ICE_SERVERS);
     pcRef.current = pc;
-
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) socket.emit("ice-candidate", { code, candidate });
     };
+    pc.oniceconnectionstatechange = () =>
+      console.log("🧊 ICE:", pc.iceConnectionState);
     pc.onconnectionstatechange = () => {
+      console.log("🔗 Conn:", pc.connectionState);
       if (pc.connectionState === "connected") setIsConnected(true);
       if (["disconnected", "failed", "closed"].includes(pc.connectionState))
         setIsConnected(false);
     };
     pc.ontrack = (event) => {
-      if (remoteVideoRef.current)
-        remoteVideoRef.current.srcObject = event.streams[0];
+      console.log("🎥 ontrack fired");
+      const stream = event.streams[0];
+      if (!stream) return;
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = stream;
+        remoteVideoRef.current
+          .play()
+          .catch((e) => console.warn("autoplay blocked:", e.message));
+      }
     };
     return pc;
   }, [code]);
 
-  // HOST: triggered by button click — must be a direct user gesture
-  const startScreenShare = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { cursor: "always", frameRate: { ideal: 30, max: 60 } },
-        audio: false,
-      });
+  const sendStream = useCallback(
+    async (stream) => {
       localStreamRef.current = stream;
       setIsCapturing(true);
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-
-      // Browser's native Stop Sharing button → kick both peers out
-      stream.getVideoTracks()[0].onended = () => {
-        socket.emit("end-session", { code });
-        stopSharing();
-        onSessionEndedRef.current?.();
-      };
-
+      stream.getTracks().forEach((t) => {
+        t.onended = () => {
+          socket.emit("end-session", { code });
+          stopSharing();
+          onSessionEndedRef.current?.();
+        };
+      });
       const pc = createPeerConnection();
       stream.getTracks().forEach((t) => pc.addTrack(t, stream));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket.emit("offer", { code, offer });
+    },
+    [code, createPeerConnection, stopSharing],
+  );
+  const startScreenShare = useCallback(async () => {
+    if (!canScreenShare()) {
+      setError(
+        "Screen sharing isn't supported on mobile.\nUse a desktop browser to share your screen.",
+      );
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { cursor: "always", frameRate: { ideal: 30, max: 60 } },
+        audio: true,
+      });
+      await sendStream(stream);
     } catch (err) {
       if (err.name === "NotAllowedError")
         setError("Screen share permission denied.");
       else setError("Screen capture failed: " + err.message);
     }
-  }, [code, createPeerConnection, stopSharing]);
+  }, [sendStream]);
+
+  const startCameraShare = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "environment",
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: true,
+      });
+      await sendStream(stream);
+    } catch (err) {
+      if (err.name === "NotAllowedError") setError("Camera permission denied.");
+      else setError("Camera failed: " + err.message);
+    }
+  }, [sendStream]);
 
   const handleOffer = useCallback(
     async (offer) => {
@@ -96,7 +161,7 @@ export const useWebRTC = (role, code, onSessionEnded) => {
         await pc.setLocalDescription(answer);
         socket.emit("answer", { code, answer });
       } catch (err) {
-        setError("Failed to handle offer: " + err.message);
+        setError("Failed to connect: " + err.message);
       }
     },
     [code, createPeerConnection],
@@ -104,12 +169,11 @@ export const useWebRTC = (role, code, onSessionEnded) => {
 
   useEffect(() => {
     if (!code) return;
-
     const onPeerJoined = () => {
       if (role === "host") setGuestReady(true);
     };
-    const onOffer = async (offer) => {
-      if (role === "guest") await handleOffer(offer);
+    const onOffer = (offer) => {
+      if (role === "guest") handleOffer(offer);
     };
     const onAnswer = async (answer) => {
       if (role === "host") {
@@ -118,7 +182,7 @@ export const useWebRTC = (role, code, onSessionEnded) => {
             new RTCSessionDescription(answer),
           );
         } catch (err) {
-          setError("Failed to set answer: " + err.message);
+          setError("Failed: " + err.message);
         }
       }
     };
@@ -126,14 +190,9 @@ export const useWebRTC = (role, code, onSessionEnded) => {
       try {
         if (pcRef.current && candidate)
           await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (err) {
-        console.error("ICE error:", err);
-      }
+      } catch {}
     };
-
-    // The OTHER peer ended the session → clean up and navigate back
-    const handleSessionEnded = () => {
-      console.log("🔴 Remote peer ended session — navigating back");
+    const onSessionEnded = () => {
       stopSharing();
       onSessionEndedRef.current?.();
     };
@@ -142,14 +201,14 @@ export const useWebRTC = (role, code, onSessionEnded) => {
     socket.on("offer", onOffer);
     socket.on("answer", onAnswer);
     socket.on("ice-candidate", onIceCandidate);
-    socket.on("session-ended", handleSessionEnded);
+    socket.on("session-ended", onSessionEnded);
 
     return () => {
       socket.off("peer-joined", onPeerJoined);
       socket.off("offer", onOffer);
       socket.off("answer", onAnswer);
       socket.off("ice-candidate", onIceCandidate);
-      socket.off("session-ended", handleSessionEnded);
+      socket.off("session-ended", onSessionEnded);
     };
   }, [code, role, handleOffer, stopSharing]);
 
@@ -160,7 +219,9 @@ export const useWebRTC = (role, code, onSessionEnded) => {
     isConnected,
     guestReady,
     error,
+    isMobileHost,
     stopSharing,
     startScreenShare,
+    startCameraShare,
   };
 };

@@ -1,10 +1,23 @@
 // src/components/ScreenShareView.jsx
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useWebRTC } from "../hooks/useWebRTC";
-import { MonitorOff, Wifi, WifiOff, Loader, Monitor } from "lucide-react";
+import {
+  MonitorOff,
+  WifiOff,
+  Loader,
+  Monitor,
+  Smartphone,
+  Camera,
+  Play,
+} from "lucide-react";
 import socket from "../utils/socket";
 
-const ScreenShareView = ({ role, code, onEnd }) => {
+const ScreenShareView = ({
+  role,
+  code,
+  onEnd,
+  guestReady: initialGuestReady = false,
+}) => {
   const {
     localVideoRef,
     remoteVideoRef,
@@ -12,16 +25,43 @@ const ScreenShareView = ({ role, code, onEnd }) => {
     isConnected,
     guestReady,
     error,
+    isMobileHost,
     stopSharing,
     startScreenShare,
-  } = useWebRTC(role, code, onEnd);
-  // ↑ onEnd is passed as onSessionEnded — fires when the REMOTE peer ends the session
+    startCameraShare,
+  } = useWebRTC(role, code, onEnd, initialGuestReady);
 
-  // When THIS peer clicks Stop/Disconnect:
-  // 1. emit end-session → server fires session-ended to other peer → they call onEnd too
-  // 2. clean up local WebRTC
-  // 3. disconnect socket
-  // 4. call onEnd → navigate back to own view
+  const [needsTap, setNeedsTap] = useState(false);
+
+  // Lock body scroll
+  useEffect(() => {
+    const prev = {
+      overflow: document.body.style.overflow,
+      position: document.body.style.position,
+    };
+    document.body.style.overflow = "hidden";
+    document.body.style.position = "fixed";
+    document.body.style.width = "100%";
+    document.body.style.height = "100%";
+    return () => Object.assign(document.body.style, prev);
+  }, []);
+
+  // Guest: watch for stream + handle autoplay block
+  useEffect(() => {
+    if (role !== "guest") return;
+    const video = remoteVideoRef.current;
+    if (!video) return;
+    const tryPlay = () => {
+      video
+        .play()
+        .then(() => setNeedsTap(false))
+        .catch(() => setNeedsTap(true));
+    };
+    video.addEventListener("loadedmetadata", tryPlay);
+    if (video.srcObject) tryPlay();
+    return () => video.removeEventListener("loadedmetadata", tryPlay);
+  }, [role, remoteVideoRef, isConnected]);
+
   const handleEnd = () => {
     socket.emit("end-session", { code });
     stopSharing();
@@ -29,149 +69,533 @@ const ScreenShareView = ({ role, code, onEnd }) => {
     onEnd?.();
   };
 
-  return (
-    <div className="relative w-full rounded-[32px] overflow-hidden bg-zinc-950 border border-zinc-800/50 shadow-2xl">
-      {/* Status bar */}
-      <div className="flex items-center justify-between px-4 py-3 bg-zinc-900/80 border-b border-zinc-800/50">
-        <div className="flex items-center gap-2">
-          {isConnected ? (
-            <>
-              <Wifi size={14} className="text-green-400" />
-              <span className="text-[11px] font-bold text-green-400 uppercase tracking-widest">
-                Stream Active
-              </span>
-            </>
-          ) : (
-            <>
-              <Loader size={14} className="text-yellow-400 animate-spin" />
-              <span className="text-[11px] font-bold text-yellow-400 uppercase tracking-widest">
-                {role === "host"
-                  ? guestReady
-                    ? "Guest ready — click Start Sharing"
-                    : "Waiting for guest..."
-                  : "Waiting for host to share screen..."}
-              </span>
-            </>
-          )}
-        </div>
-        <button
-          onClick={handleEnd}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-500/20 hover:bg-red-500/30 text-red-400 text-[11px] font-bold uppercase tracking-widest transition-colors border border-red-500/20"
-        >
-          <MonitorOff size={12} />
-          {role === "host" ? "Stop Sharing" : "Disconnect"}
-        </button>
-      </div>
+  const s = {
+    wrap: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 9999,
+      background: "#09090b",
+      display: "flex",
+      flexDirection: "column",
+    },
+    topbar: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      padding: "10px 16px",
+      flexShrink: 0,
+      minHeight: 52,
+      background: "rgba(9,9,11,0.98)",
+      borderBottom: "1px solid rgba(63,63,70,0.5)",
+    },
+    dot: (ok) => ({
+      width: 8,
+      height: 8,
+      borderRadius: "50%",
+      flexShrink: 0,
+      background: ok ? "#4ade80" : "#facc15",
+      boxShadow: ok
+        ? "0 0 8px rgba(74,222,128,0.8)"
+        : "0 0 8px rgba(250,204,21,0.6)",
+    }),
+    label: (ok) => ({
+      fontSize: 11,
+      fontWeight: 700,
+      whiteSpace: "nowrap",
+      color: ok ? "#4ade80" : "#facc15",
+      textTransform: "uppercase",
+      letterSpacing: "0.08em",
+    }),
+    endBtn: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      padding: "8px 14px",
+      borderRadius: 12,
+      flexShrink: 0,
+      background: "rgba(239,68,68,0.15)",
+      border: "1px solid rgba(239,68,68,0.35)",
+      color: "#f87171",
+      fontSize: 11,
+      fontWeight: 800,
+      textTransform: "uppercase",
+      letterSpacing: "0.08em",
+      cursor: "pointer",
+      whiteSpace: "nowrap",
+    },
+  };
 
-      {/* Main area */}
-      <div
-        className="relative w-full bg-zinc-950"
-        style={{ minHeight: "420px" }}
-      >
-        {/* GUEST: remote stream */}
-        {role === "guest" && (
+  const TopBar = () => (
+    <div style={s.topbar}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={s.dot(isConnected)} />
+        <span style={s.label(isConnected)}>
+          {isConnected
+            ? "Live"
+            : role === "host"
+              ? guestReady
+                ? "Guest ready — start sharing"
+                : "Waiting for guest..."
+              : "Waiting for host..."}
+        </span>
+      </div>
+      <button onClick={handleEnd} style={s.endBtn}>
+        <MonitorOff size={13} />
+        {role === "host" ? "Stop" : "Disconnect"}
+      </button>
+    </div>
+  );
+
+  // ── GUEST view ─────────────────────────────────────────────────────────────
+  if (role === "guest") {
+    return (
+      <div style={s.wrap}>
+        <TopBar />
+        <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
           <video
             ref={remoteVideoRef}
             autoPlay
             playsInline
-            className="w-full h-full object-contain"
-            style={{ minHeight: "420px", background: "#09090b" }}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: "contain",
+              background: "#09090b",
+              display: "block",
+            }}
           />
+
+          {/* Waiting for host overlay */}
+          {!isConnected && !needsTap && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                pointerEvents: "none",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 16,
+                padding: "0 32px",
+              }}
+            >
+              <div
+                style={{
+                  width: 64,
+                  height: 64,
+                  borderRadius: 20,
+                  background: "rgba(168,85,247,0.1)",
+                  border: "1px solid rgba(168,85,247,0.25)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <Loader size={28} color="#a855f7" />
+              </div>
+              <p
+                style={{
+                  color: "#a1a1aa",
+                  fontSize: 15,
+                  fontWeight: 600,
+                  textAlign: "center",
+                  margin: 0,
+                }}
+              >
+                Waiting for host to share screen...
+              </p>
+              <p
+                style={{
+                  color: "#52525b",
+                  fontSize: 13,
+                  textAlign: "center",
+                  margin: 0,
+                }}
+              >
+                Host needs to click "Start Sharing Screen"
+              </p>
+            </div>
+          )}
+
+          {/* Tap-to-play (mobile autoplay blocked) */}
+          {needsTap && (
+            <div
+              onClick={() =>
+                remoteVideoRef.current?.play().then(() => setNeedsTap(false))
+              }
+              style={{
+                position: "absolute",
+                inset: 0,
+                cursor: "pointer",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 16,
+                background: "rgba(9,9,11,0.85)",
+              }}
+            >
+              <div
+                style={{
+                  width: 72,
+                  height: 72,
+                  borderRadius: "50%",
+                  background: "rgba(124,58,237,0.25)",
+                  border: "2px solid rgba(124,58,237,0.5)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <Play size={32} color="#a855f7" fill="#a855f7" />
+              </div>
+              <p
+                style={{
+                  color: "#a1a1aa",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  margin: 0,
+                }}
+              >
+                Tap to start viewing
+              </p>
+            </div>
+          )}
+        </div>
+        {error && <ErrorOverlay error={error} onClose={handleEnd} />}
+      </div>
+    );
+  }
+
+  // ── HOST view ──────────────────────────────────────────────────────────────
+  return (
+    <div style={s.wrap}>
+      <TopBar />
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "24px",
+          overflow: "auto",
+        }}
+      >
+        <video ref={remoteVideoRef} style={{ display: "none" }} />
+        {/* Waiting for guest */}
+        {!isCapturing && !guestReady && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 20,
+              textAlign: "center",
+              maxWidth: 360,
+            }}
+          >
+            <div
+              style={{
+                width: 72,
+                height: 72,
+                borderRadius: 22,
+                background: "rgba(168,85,247,0.1)",
+                border: "1px solid rgba(168,85,247,0.2)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Loader size={32} color="#a855f7" />
+            </div>
+            <p
+              style={{
+                color: "#e4e4e7",
+                fontWeight: 700,
+                fontSize: 20,
+                margin: 0,
+              }}
+            >
+              Waiting for guest
+            </p>
+            <p
+              style={{
+                color: "#71717a",
+                fontSize: 14,
+                lineHeight: 1.6,
+                margin: 0,
+              }}
+            >
+              Share your access code with the person you want to connect with.
+            </p>
+          </div>
         )}
 
-        {/* HOST: hidden remote ref */}
-        {role === "host" && (
-          <video ref={remoteVideoRef} style={{ display: "none" }} />
-        )}
-
-        {/* HOST UI */}
-        {role === "host" && (
-          <div className="flex flex-col items-center justify-center w-full gap-6 py-16 px-8">
-            {!isCapturing && !guestReady && (
-              <div className="flex flex-col items-center gap-4 text-center">
-                <div className="w-16 h-16 rounded-2xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center animate-pulse">
-                  <Loader size={28} className="text-purple-400" />
-                </div>
-                <p className="text-zinc-300 font-semibold">
-                  Waiting for guest to join
-                </p>
-                <p className="text-zinc-500 text-sm">
-                  Share your access code with the person you want to connect
-                  with.
-                </p>
-              </div>
-            )}
-
-            {!isCapturing && guestReady && (
-              <div className="flex flex-col items-center gap-6 text-center">
-                <div className="w-16 h-16 rounded-2xl bg-green-500/10 border border-green-500/20 flex items-center justify-center">
-                  <Monitor size={28} className="text-green-400" />
-                </div>
-                <div>
-                  <p className="text-white font-bold text-lg mb-1">
-                    Guest has joined!
-                  </p>
-                  <p className="text-zinc-400 text-sm">
-                    Click the button below to choose which screen to share.
-                  </p>
-                </div>
-                <button
-                  onClick={startScreenShare}
-                  className="px-10 py-4 rounded-3xl cursor-pointer text-sm font-black uppercase tracking-[0.2em] text-white bg-gradient-to-r from-[#7c3aed] to-[#c026d3] hover:from-[#8b5cf6] hover:to-[#d946ef] shadow-lg shadow-[rgba(124,58,237,0.3)] transition-all duration-300 active:scale-95"
-                >
-                  Start Sharing Screen
-                </button>
-              </div>
-            )}
-
-            {isCapturing && (
-              <div className="flex flex-col items-center gap-4 text-center w-full">
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                  <span className="text-green-400 font-bold text-sm uppercase tracking-widest">
-                    {isConnected
-                      ? "Screen is being shared"
-                      : "Connecting peer..."}
-                  </span>
-                </div>
-                <video
-                  ref={localVideoRef}
-                  autoPlay
-                  muted
-                  playsInline
-                  className="rounded-2xl border border-zinc-700 shadow-lg w-full max-w-lg"
+        {/* Guest joined — pick sharing method */}
+        {!isCapturing && guestReady && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 24,
+              textAlign: "center",
+              maxWidth: 400,
+            }}
+          >
+            <div
+              style={{
+                width: 72,
+                height: 72,
+                borderRadius: 22,
+                background: "rgba(34,197,94,0.1)",
+                border: "1px solid rgba(34,197,94,0.25)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Monitor size={32} color="#4ade80" />
+            </div>
+            <div>
+              <p
+                style={{
+                  color: "#fff",
+                  fontWeight: 800,
+                  fontSize: 22,
+                  margin: "0 0 8px",
+                }}
+              >
+                Guest has joined! 🎉
+              </p>
+              {isMobileHost ? (
+                <p
                   style={{
-                    maxHeight: "280px",
-                    objectFit: "contain",
-                    background: "#09090b",
+                    color: "#a1a1aa",
+                    fontSize: 14,
+                    lineHeight: 1.6,
+                    margin: 0,
                   }}
-                />
-                <p className="text-[10px] text-zinc-600 uppercase tracking-widest">
-                  Your screen preview
+                >
+                  Screen sharing isn't available on mobile. Share your{" "}
+                  <strong style={{ color: "#e4e4e7" }}>camera</strong> or use a{" "}
+                  <strong style={{ color: "#e4e4e7" }}>desktop browser</strong>.
                 </p>
+              ) : (
+                <p
+                  style={{
+                    color: "#a1a1aa",
+                    fontSize: 14,
+                    lineHeight: 1.6,
+                    margin: 0,
+                  }}
+                >
+                  Click below, then pick{" "}
+                  <strong style={{ color: "#e4e4e7" }}>Entire Screen</strong>.
+                </p>
+              )}
+            </div>
+
+            {!isMobileHost && (
+              <button
+                onClick={startScreenShare}
+                style={{
+                  padding: "16px 40px",
+                  borderRadius: 40,
+                  border: "none",
+                  color: "#fff",
+                  fontSize: 14,
+                  fontWeight: 800,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.15em",
+                  background: "linear-gradient(135deg, #7c3aed, #c026d3)",
+                  cursor: "pointer",
+                  boxShadow: "0 8px 32px rgba(124,58,237,0.4)",
+                }}
+              >
+                Start Sharing Screen
+              </button>
+            )}
+
+            {isMobileHost && (
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 12,
+                  width: "100%",
+                  maxWidth: 300,
+                }}
+              >
+                <button
+                  onClick={startCameraShare}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 10,
+                    padding: "14px 24px",
+                    borderRadius: 40,
+                    border: "none",
+                    color: "#fff",
+                    fontSize: 13,
+                    fontWeight: 800,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.12em",
+                    background: "linear-gradient(135deg, #7c3aed, #c026d3)",
+                    cursor: "pointer",
+                    boxShadow: "0 8px 32px rgba(124,58,237,0.4)",
+                  }}
+                >
+                  <Camera size={16} /> Share Camera
+                </button>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "12px 16px",
+                    borderRadius: 14,
+                    background: "rgba(250,204,21,0.08)",
+                    border: "1px solid rgba(250,204,21,0.2)",
+                  }}
+                >
+                  <Smartphone
+                    size={15}
+                    color="#facc15"
+                    style={{ flexShrink: 0 }}
+                  />
+                  <p
+                    style={{
+                      color: "#fbbf24",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      margin: 0,
+                      textAlign: "left",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    For screen sharing, use Chrome or Edge on desktop
+                  </p>
+                </div>
               </div>
             )}
           </div>
         )}
-
-        {/* Error overlay */}
-        {error && (
-          <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/90 z-10">
-            <div className="flex flex-col items-center gap-3 text-center px-8">
-              <WifiOff size={32} className="text-red-400" />
-              <p className="text-red-400 font-bold text-sm">{error}</p>
-              <button
-                onClick={handleEnd}
-                className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-bold uppercase tracking-widest hover:bg-zinc-700 transition-colors"
+        {/* Capturing — show local preview */}
+        {isCapturing && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 16,
+              width: "100%",
+              maxWidth: 720,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: "#4ade80",
+                  boxShadow: "0 0 8px rgba(74,222,128,0.8)",
+                }}
+              />
+              <span
+                style={{
+                  color: "#4ade80",
+                  fontWeight: 700,
+                  fontSize: 13,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.1em",
+                }}
               >
-                Close
-              </button>
+                {isConnected
+                  ? "Stream active — guest can see your screen"
+                  : "Connecting via TURN relay..."}
+              </span>
             </div>
+            <video
+              ref={localVideoRef}
+              autoPlay
+              muted
+              playsInline
+              style={{
+                width: "100%",
+                maxHeight: "calc(100vh - 200px)",
+                objectFit: "contain",
+                borderRadius: 16,
+                border: "1px solid rgba(63,63,70,0.6)",
+                background: "#09090b",
+              }}
+            />
+            <p
+              style={{
+                color: "#52525b",
+                fontSize: 11,
+                textTransform: "uppercase",
+                letterSpacing: "0.15em",
+                margin: 0,
+              }}
+            >
+              {isMobileHost ? "Camera preview" : "Your screen preview"}
+            </p>
           </div>
         )}
       </div>
+      {error && <ErrorOverlay error={error} onClose={handleEnd} />}
     </div>
   );
 };
+
+const ErrorOverlay = ({ error, onClose }) => (
+  <div
+    style={{
+      position: "absolute",
+      inset: 0,
+      zIndex: 20,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      background: "rgba(9,9,11,0.93)",
+    }}
+  >
+    <div style={{ textAlign: "center", padding: "0 32px", maxWidth: 340 }}>
+      <WifiOff size={36} color="#f87171" style={{ margin: "0 auto 16px" }} />
+      <p
+        style={{
+          color: "#f87171",
+          fontWeight: 700,
+          fontSize: 15,
+          marginBottom: 20,
+          whiteSpace: "pre-line",
+          lineHeight: 1.5,
+        }}
+      >
+        {error}
+      </p>
+      <button
+        onClick={onClose}
+        style={{
+          padding: "10px 28px",
+          borderRadius: 12,
+          background: "rgba(39,39,42,0.9)",
+          border: "1px solid rgba(63,63,70,0.5)",
+          color: "#d4d4d8",
+          fontSize: 13,
+          fontWeight: 700,
+          cursor: "pointer",
+        }}
+      >
+        Close
+      </button>
+    </div>
+  </div>
+);
 
 export default ScreenShareView;
